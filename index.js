@@ -146,7 +146,7 @@ app.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
     try {
-        const [users] = await db.query('SELECT id, password, hash FROM users WHERE email = ?', [email]);
+        const [users] = await db.query('SELECT id, password, hash, settings FROM users WHERE email = ?', [email]);
 
         if (users.length === 0) {
             return res.status(401).json({ error: 'Invalid credentials' });
@@ -161,7 +161,7 @@ app.post('/login', async (req, res) => {
 
         const token = jwt.sign({ user_id: user.id }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
-        res.json({ token, user_id: user.id, hash: user.hash });
+        res.json({ token, user_id: user.id, hash: user.hash, settings: user.settings });
     } catch (err) {
         console.error('Error during login:', err);
         res.status(500).json({ error: 'Internal Server Error' });
@@ -352,7 +352,8 @@ app.post('/user_weights', async (req, res) => {
         }
 
         const query = 'INSERT INTO user_weights (user_id, date, weight) VALUES (?, ?, ?)';
-        await db.query(query, [user_id, date, weight]);
+        const dateObject = new Date(date);
+        await db.query(query, [user_id, dateObject, weight]);
 
         res.status(201).json({ message: 'Weight log added successfully' });
     } catch (err) {
@@ -401,28 +402,61 @@ app.get('/profile/:hash', async (req, res) => {
 });
 
 app.get('/user_weights', async (req, res) => {
-    const { hash, start_date, end_date } = req.query;
+    const { user_id, start_date, end_date } = req.query;
 
-    if (!hash) {
-        return res.status(400).json({ error: 'hash is required' });
+    // Validate required parameters
+    if (!user_id) {
+        return res.status(400).json({ error: 'user_id is required' });
     }
 
-    let query = 'SELECT * FROM user_weights WHERE hash = ?';
-    const params = [hash];
+    // Validate date format
+    const isValidDate = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date);
+
+    if (start_date && !isValidDate(start_date)) {
+        return res.status(400).json({ error: 'Invalid start_date format, expected YYYY-MM-DD' });
+    }
+    
+    if (end_date && !isValidDate(end_date)) {
+        return res.status(400).json({ error: 'Invalid end_date format, expected YYYY-MM-DD' });
+    }
+
+    let query = 'SELECT * FROM user_weights WHERE user_id = ?';
+    const params = [user_id];
 
     if (start_date && end_date) {
-        query += ' AND date BETWEEN ? AND ?';
+        query += ' AND DATE(date) BETWEEN ? AND ?';
         params.push(start_date, end_date);
     }
 
     try {
+        console.log('Executing query:', query, params); // Debugging log
+
         const [weights] = await db.query(query, params);
+
+        if (!weights || weights.length === 0) {
+            return res.status(404).json({ error: 'No weight records found for the given parameters' });
+        }
+
         res.json(weights);
     } catch (err) {
-        console.error('Error fetching user weights:', err);
-        res.status(500).json({ error: 'Internal Server Error' });
+        console.error('Database error:', err);
+
+        if (err.code === 'ER_PARSE_ERROR') {
+            return res.status(400).json({ error: 'SQL syntax error, check query parameters' });
+        }
+
+        if (err.code === 'ER_BAD_FIELD_ERROR') {
+            return res.status(400).json({ error: 'Invalid field name in query' });
+        }
+
+        if (err.code === 'ER_ACCESS_DENIED_ERROR') {
+            return res.status(403).json({ error: 'Database access denied' });
+        }
+
+        return res.status(500).json({ error: 'Internal Server Error' });
     }
 });
+
 
 
 app.listen(3000, () => console.log('Server running on port 3000'));
