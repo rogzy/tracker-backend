@@ -7,30 +7,46 @@ const swaggerJsdoc = require('swagger-jsdoc');
 const cors = require('cors');
 const crypto = require('crypto');
 
+// Log that the app has started
+console.log('App is starting...');
+
+// Function to generate unique hash
 function generateUniqueHash() {
     return crypto.randomBytes(3).toString('hex'); // 6 characters
 }
 
+// Load environment variables
+require('dotenv').config({ path: './.env.development' }); // Force loading the development environment file
+
+
 // Enable CORS for all origins
-
-
-require('dotenv').config();
-
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors({
+    origin: '*',  // Allows all origins, or you can specify a particular domain, e.g., 'http://localhost:5173'
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],  // Allowed methods
+}));
 
-// Database connection
-const db = mysql.createPool({
+// Database connection setup
+const dbConfig = {
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME
-});
+    database: process.env.DB_NAME,
+};
 
+// Create database pool using configuration
+const db = mysql.createPool(dbConfig);
+
+// Test the DB connection
 db.getConnection()
-    .then(() => console.log('Database connection successful'))
-    .catch(err => console.error('Database connection failed:', err));
+    .then(() => {
+        console.log('Database connection successful');
+    })
+    .catch(err => {
+        console.error('Database connection failed:', err);
+    });
+
 
 // JWT Secret
 const SECRET = process.env.JWT_SECRET;
@@ -65,6 +81,49 @@ const authenticate = (req, res, next) => {
         next();
     });
 };
+
+// Function to get user by ID from the database
+async function getUserById(userId) {
+    const [rows] = await db.execute("SELECT * FROM users WHERE id = ?", [userId]);
+    return rows[0]; // Assuming user_id is unique and returns a single user
+}
+
+app.get("/get-hash", async (req, res) => {
+    const token = req.headers.authorization;
+
+    if (!token) {
+        return res.status(401).json({ error: "Token required" });
+    }
+
+    try {
+        const jwtToken = token.replace("Bearer ", "");
+        const decoded = jwt.verify(jwtToken, SECRET);
+        
+        const userId = decoded.user_id;
+        if (!userId) {
+            return res.status(400).json({ error: "User ID not found in token" });
+        }
+
+        console.log("Extracted user ID:", userId);
+
+        // Retrieve user hash from database
+        const [rows] = await db.execute("SELECT hash, settings FROM users WHERE id = ?", [userId]);
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const user = rows[0];
+        return res.json({ hash: user.hash, settings: user.settings });
+    } catch (error) {
+        console.error("JWT Verification Error:", error);
+        return res.status(401).json({ error: "Invalid token" });
+    }
+});
+
+
+
+
+
 
 /**
  * @swagger
@@ -146,16 +205,23 @@ app.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
     try {
+        console.log(`Login attempt for email: ${email}`);
         const [users] = await db.query('SELECT id, password, hash, settings FROM users WHERE email = ?', [email]);
 
         if (users.length === 0) {
+            console.log('No user found with this email.');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         const user = users[0];
+        console.log(`User found:`, user);
 
-        const isPasswordValid = await bcrypt.compare(password, user.password);
+        const isPasswordValid = await bcrypt.compare(password, user.password.replace("$2y$", "$2b$"));
+        console.log(`Password match: ${isPasswordValid}`);
+
         if (!isPasswordValid) {
+            
+            console.log('Incorrect password.');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
@@ -212,9 +278,9 @@ app.post('/food_logs', async (req, res) => {
             return res.status(400).json({ error: 'User ID is required' });
         }
 
-        const { date, name, weight, calories } = req.body;
+        const { date, name, weight = null, calories } = req.body;
 
-        if (!date || !name || !weight || !calories) {
+        if (!date || !name || !calories) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
@@ -224,7 +290,7 @@ app.post('/food_logs', async (req, res) => {
         res.status(201).json({ message: 'Food log added successfully' });
     } catch (err) {
         console.error('Error adding food log:', err);
-        res.status(500).json({ error: 'Internal Server Error' });
+        res.status(500).json({ error: 'Internal Server Error', details: err.message });
     }
 });
 
@@ -351,16 +417,35 @@ app.post('/user_weights', async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        const query = 'INSERT INTO user_weights (user_id, date, weight) VALUES (?, ?, ?)';
         const dateObject = new Date(date);
+
+        // Insert or update if exists
+        const query = `
+            INSERT INTO user_weights (user_id, date, weight) 
+            VALUES (?, ?, ?) 
+            ON DUPLICATE KEY UPDATE weight = VALUES(weight);
+        `;
+
         await db.query(query, [user_id, dateObject, weight]);
 
-        res.status(201).json({ message: 'Weight log added successfully' });
+        res.status(200).json({ message: 'Weight log added or updated successfully' });
     } catch (err) {
-        console.error('Error adding weight log:', err);
+        console.error('Error handling weight log:', err);
+        
+        if (err.name === 'JsonWebTokenError') {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        if (err.name === 'TokenExpiredError') {
+            return res.status(401).json({ error: 'Token expired' });
+        }
+        if (err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'Duplicate entry' });
+        }
+
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
+
 
 
 
@@ -459,4 +544,4 @@ app.get('/user_weights', async (req, res) => {
 
 
 
-app.listen(3000, () => console.log('Server running on port 3000'));
+app.listen(3000, '0.0.0.0', () => console.log('Server running on port 3000'));
