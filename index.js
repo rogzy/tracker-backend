@@ -287,7 +287,7 @@ app.post("/login", async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [date, name, weight, calories]
+ *             required: [date, name, calories]
  *             properties:
  *               user_id:
  *                 type: integer
@@ -299,9 +299,24 @@ app.post("/login", async (req, res) => {
  *                 type: string
  *               weight:
  *                 type: number
+ *                 description: Weight of the food item (optional)
  *               calories:
  *                 type: number
+ *               amount:
+ *                 type: integer
+ *                 description: Number of food logs to add (optional, default is 1)
+ *                 minimum: 1
+ *                 maximum: 10
+ *                 example: 1
+ *     responses:
+ *       201:
+ *         description: Food log(s) added successfully
+ *       400:
+ *         description: Invalid request or exceeded limit (e.g., 'amount' cannot exceed 10)
+ *       500:
+ *         description: Internal Server Error
  */
+
 app.post("/food_logs", async (req, res) => {
 	try {
 		const authHeader = req.headers.authorization;
@@ -317,21 +332,27 @@ app.post("/food_logs", async (req, res) => {
 			return res.status(400).json({ error: "User ID is required" });
 		}
 
-		const { date, name, weight = null, calories } = req.body;
+		const { date, name, weight = null, calories, amount = 1 } = req.body;
 
 		if (!date || !name || !calories) {
 			return res.status(400).json({ error: "Missing required fields" });
 		}
 
-		const query = "INSERT INTO food_logs (user_id, date, name, weight, calories) VALUES (?, ?, ?, ?, ?)";
-		await db.query(query, [user_id, date, name, weight, calories]);
+		if (amount > 10) {
+			return res.status(400).json({ error: "Amount cannot exceed 10" });
+		}
+		for (let i = 0; i < amount; i++) {
+			const query = "INSERT INTO food_logs (user_id, date, name, weight, calories) VALUES (?, ?, ?, ?, ?)";
+			await db.query(query, [user_id, date, name, weight, calories]);
+		}
 
-		res.status(201).json({ message: "Food log added successfully" });
+		res.status(201).json({ message: `${amount} food log(s) added successfully` });
 	} catch (err) {
 		console.error("Error adding food log:", err);
 		res.status(500).json({ error: "Internal Server Error", details: err.message });
 	}
 });
+
 
 /**
  * @swagger
